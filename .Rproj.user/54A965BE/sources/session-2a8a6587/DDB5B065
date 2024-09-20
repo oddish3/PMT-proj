@@ -1,0 +1,27 @@
+{
+    "id": "DDB5B065",
+    "path": "~/Documents/R_folder/PMT-proj/code/main.R",
+    "project_path": "code/main.R",
+    "type": "r_source",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1726740653579.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "11,0",
+        "scrollLine": "0",
+        "marks": "<:11,0\n>:16,18"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1726740902,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1726740902041,
+    "read_only": false,
+    "read_only_alternatives": []
+}

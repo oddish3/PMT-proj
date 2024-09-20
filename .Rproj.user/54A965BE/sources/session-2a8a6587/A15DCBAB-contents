@@ -1,0 +1,134 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   stepwise regression
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+rm(list=ls())
+
+# libraries ----
+library(dplyr)
+library(MASS)  # For stepwise regression
+library(lmtest)  # For clustered standard errors
+library(broom)  # For tidy model output
+library(readr)  # For writing CSV
+library(sandwich)
+
+# Assuming your data is in a dataframe called 'data'
+data <- readRDS(file = "../data/processed/08_data.RData")
+
+# Generate new variables
+data <- data %>%
+  mutate(
+    age_head_sq = age_head^2,
+    loghhsize = log(hhsize)
+  )
+
+# Define variable groups
+wealth_vars <- c("water_piped", "water_well", "toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "members_per_room", "kitchen_room", "fuel_elecgas", "fuel_charcoal")
+assets_vars <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron", "satelite", "generator", "own_house")
+hh_vars <- c("urban", "loghhsize", "age_head", "age_head_sq", "female_head", "edu_head_primary", "edu_head_secondary", "max_edu_primary", "max_edu_secondary", "div_sep_head", "widow_head", "nevermar_head", "female_head_widow", "female_head_div", "female_head_nevermar", "work_paid_head", "work_selfemp_nonf_head", "work_daily_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm", "share_widow", "share_disabledm", "share_disabledf", "share_orphanm", "share_orphanf")
+
+# Combine all variables
+all_vars <- c(wealth_vars, assets_vars, hh_vars)
+
+# Function for stepwise regression with clustered standard errors
+stepwise_clustered <- function(data, response, predictors, cluster_var, p_enter = 0.01, p_remove = 0.01) {
+  # Start with null model
+  current_formula <- as.formula(paste(response, "~ 1"))
+  current_predictors <- character(0)
+
+  while(TRUE) {
+    # Forward step
+    forward_models <- lapply(setdiff(predictors, current_predictors), function(var) {
+      tryCatch({
+        new_predictors <- c(current_predictors, var)
+        new_formula <- as.formula(paste(response, "~", paste(new_predictors, collapse = " + ")))
+        model <- lm(new_formula, data = data)
+        coeftest_result <- coeftest(model, vcov = vcovCL, cluster = data[[cluster_var]])
+        if (is.null(dim(coeftest_result))) {
+          return(NULL)  # Skip if coeftest_result is not a matrix
+        }
+        return(list(coef = coeftest_result, var = var))
+      }, error = function(e) {
+        return(NULL)  # Return NULL if there's an error
+      })
+    })
+
+    # Remove NULL results
+    forward_models <- forward_models[!sapply(forward_models, is.null)]
+
+    if (length(forward_models) == 0) {
+      break  # Exit if no valid models
+    }
+
+    forward_p_values <- sapply(forward_models, function(x) {
+      if (x$var %in% rownames(x$coef)) {
+        return(x$coef[x$var, "Pr(>|t|)"])  # Get p-value for the new variable
+      } else {
+        return(Inf)  # Return Inf if variable not in coefficient matrix
+      }
+    })
+
+    best_forward <- which.min(forward_p_values)
+
+    if (length(best_forward) == 0 || forward_p_values[best_forward] >= p_enter) {
+      break
+    }
+
+    current_predictors <- c(current_predictors, forward_models[[best_forward]]$var)
+    current_formula <- as.formula(paste(response, "~", paste(current_predictors, collapse = " + ")))
+
+    # Backward step
+    current_model <- lm(current_formula, data = data)
+    current_test <- coeftest(current_model, vcov = vcovCL, cluster = data[[cluster_var]])
+
+    if (is.null(dim(current_test)) || nrow(current_test) <= 1) {
+      break  # Exit if current_test is not a matrix or only has intercept
+    }
+
+    predictor_p_values <- current_test[-1, "Pr(>|t|)"]  # Exclude intercept
+    worst_p_value <- max(predictor_p_values)
+    worst_var <- names(predictor_p_values)[which.max(predictor_p_values)]
+
+    if (worst_p_value > p_remove) {
+      current_predictors <- setdiff(current_predictors, worst_var)
+      current_formula <- as.formula(paste(response, "~", paste(current_predictors, collapse = " + ")))
+    }
+  }
+
+  return(lm(current_formula, data = data))
+}
+
+# Perform stepwise regression for each country
+data$yhat_step_consump <- NA
+
+# Perform stepwise regression for each country
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+results <- list()
+
+for (country in countries) {
+  cat("Processing country:", country, "\n")  # Add this line for debugging
+  country_data <- data %>% filter(country == !!country)
+
+  model <- stepwise_clustered(
+    data = country_data,
+    response = "consump",
+    predictors = all_vars,
+    cluster_var = "EA",
+    p_enter = 0.01,
+    p_remove = 0.01
+  )
+
+  results[[country]] <- model
+
+  # Generate predictions
+  predictions <- predict(model, newdata = country_data)
+  data$yhat_step_consump[data$country == country] <- predictions
+}
+
+# Export results to CSV
+results_tidy <- bind_rows(lapply(names(results), function(country) {
+  tidy(results[[country]]) %>% mutate(country = country)
+}))
+
+# write_csv(results_tidy, "results.csv")
+
+saveRDS(data, file = "../data/processed/09_data.RData")

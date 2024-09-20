@@ -1,0 +1,80 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   script 2 basic PMT regression
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+rm(list=ls())
+
+# libraries ----
+library(tidyr)
+library(broom)
+
+data <- readRDS(file = "../data/processed/data_proc.RData")
+
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# basic regression ----
+# Create yhat_pmt_sh_consump column
+# data$yhat_pmt_sh_consump <- NA
+# attr(data$yhat_pmt_sh_consump, "label") <- "Predicted values short PMT"
+
+# Define variable groups
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+
+# Function to run regression for each country, removing constant variables since run into error otherwise
+run_regression <- function(country_name) {
+  country_data <- data[country == country_name]
+
+  # Create factor variables
+  country_data[, `:=`(
+    hhsize_cat = factor(hhsize_cat),
+    age_head_cat = factor(age_head_cat),
+    state = factor(state),
+    month = factor(month)
+  )]
+
+  # Remove factors with only one level
+  factors_to_include <- sapply(country_data[, .(hhsize_cat, age_head_cat, state, month)], function(x) length(levels(x)) > 1)
+  factor_vars <- names(factors_to_include)[factors_to_include]
+
+  # Construct formula
+  formula_vars <- c(wealth, hh, paste0("factor(", factor_vars, ")"))
+  formula <- as.formula(paste("consump ~", paste(formula_vars, collapse = " + ")))
+
+  # Run regression
+  model <- lm(formula, data = country_data)
+
+  # Generate predictions
+  predictions <- predict(model)
+  data[country == country_name, yhat_pmt_sh_consump := predictions]
+
+  return(model)
+}
+
+# Run regressions for each country
+models <- lapply(countries, run_regression)
+
+# Create summary table
+summary_table <- do.call(rbind, lapply(models, function(m) {
+  tidy(m) %>%
+    filter(term %in% c(wealth, hh)) %>%
+    dplyr::select(term, estimate, std.error, statistic, p.value)
+}))
+
+data <- data %>%
+  mutate(yhat_pmt_sh_consump = structure(yhat_pmt_sh_consump,
+                                         label = "Predicted values short PMT"))
+
+# Export results
+# stargazer(models,
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(models, function(m) sqrt(diag(vcovHC(m, type = "HC1"))))),
+#           add.lines = list(c("Observations", sapply(models, nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+saveRDS(data, file = "../data/processed/01_data.RData")

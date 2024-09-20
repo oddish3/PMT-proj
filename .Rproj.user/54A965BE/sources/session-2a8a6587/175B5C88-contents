@@ -1,0 +1,8 @@
+rm(list=ls())
+
+source("~/Documents/R_folder/PMT-proj/00_load_clean.R")
+source("~/Documents/R_folder/PMT-proj/01_pmt_reg_basic.R")
+source("~/Documents/R_folder/PMT-proj/02_pmt_ols_probit.R")
+source("~/Documents/R_folder/PMT-proj/03_pmt_quantile_reg.R")
+source("~/Documents/R_folder/PMT-proj/04_pmt_weight_reg.R")
+source("~/Documents/R_folder/PMT-proj/05_ade_reg_basic.R")

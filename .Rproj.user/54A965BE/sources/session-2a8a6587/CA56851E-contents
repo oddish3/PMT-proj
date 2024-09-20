@@ -1,0 +1,57 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   PMT for Regional Burkina only - 'testing whether just running on
+# poor regions is better
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+rm(list=ls())
+
+data <- readRDS(file = "data/processed/11_data.RData")
+# librarires ----
+library(dplyr)
+library(haven)
+library(fixest)
+library(broom)
+
+# Generate new variable for predicted values
+data$yhat_pmt_sh_cons_burk <- NA
+# Note: R doesn't have built-in variable labels, but you can use the 'labelled' package if needed
+
+# Define variable groups
+wealth_vars <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish",
+                 "roof_finish", "fuel_elecgas", "fuel_charcoal")
+
+hh_vars <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary",
+             "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head",
+             "muslim", "christian", "share_05f", "share_05m", "share_614f",
+             "share_614m", "share_65plusf", "share_65plusm")
+
+data <- data %>%
+  mutate(across(where(is.labelled), ~as.numeric(as.character(.))))
+
+# Ensure factor variables are coded as factors
+factor_vars <- c("country", "region", "hhsize_cat", "age_head_cat", "state", "month", "EA")
+data <- data %>%
+  mutate(across(all_of(factor_vars), as.factor))
+
+# Run regression
+formula <- as.formula(paste("consump ~",
+                            paste(c(wealth_vars, hh_vars,
+                                    "hhsize_cat", "age_head_cat", "state", "month"),
+                                  collapse = " + ")))
+
+model <- feols(formula,
+               data = data[data$country == "BurkinaFaso" & (data$region == 2 | data$region == 9), ],
+               cluster = ~EA)
+
+# Generate predicted values
+data$yhat_pmt_sh_cons_burk[data$country == "BurkinaFaso" & (data$region == 2 | data$region == 9)] <-
+  predict(model, newdata = data[data$country == "BurkinaFaso" & (data$region == 2 | data$region == 9), ])
+
+# Save results
+results <- tidy(model)
+results <- results[results$term %in% c(wealth_vars, hh_vars), ]
+
+# write.csv(results, "results.csv", row.names = FALSE)
+
+# Save the dataset
+saveRDS(data, file = "data/processed/12_data.RData")

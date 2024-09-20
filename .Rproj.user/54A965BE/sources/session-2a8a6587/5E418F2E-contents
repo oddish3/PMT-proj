@@ -1,0 +1,103 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   basic weighted regression
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+rm(list=ls())
+
+# libraries ----
+
+data <- readRDS(file = "../data/processed/03_data.RData")
+
+# basic weighted regression ----
+
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to run regression and predict
+run_regression_and_predict <- function(data, country, pctile, wealth, hh) {
+  # Subset data
+  subset_data <- data %>%
+    filter(country == !!country, consumption_pctile <= pctile)
+
+  # Create formula
+  all_vars <- c(wealth, hh, "hhsize_cat", "age_head_cat", "state", "month")
+
+  # Check for variables with more than one level
+  valid_vars <- sapply(all_vars, function(v) {
+    if (v %in% c("hhsize_cat", "age_head_cat", "state", "month")) {
+      length(unique(subset_data[[v]])) > 1
+    } else {
+      TRUE  # Keep all non-factor variables
+    }
+  })
+
+  # Create formula with only valid variables
+  formula_vars <- c(all_vars[valid_vars])
+  formula <- as.formula(paste("consump ~", paste(formula_vars, collapse = " + ")))
+
+  # Run regression
+  model <- feols(formula, data = subset_data, cluster = ~EA)
+
+  # Generate predictions
+  predictions <- predict(model, newdata = data %>% filter(country == !!country))
+
+  list(model = model, predictions = predictions)
+}
+
+# Main analysis loop
+models <- list()
+for (country in countries) {
+
+  # 20th percentile
+  result_20 <- run_regression_and_predict(data, country, 20, wealth, hh)
+  models[[paste0(country, "_20")]] <- result_20$model
+  data[[paste0("yhat_20_", country)]] <- NA
+  data[[paste0("yhat_20_", country)]][data$country == country] <- result_20$predictions
+
+  # 40th percentile
+  result_40 <- run_regression_and_predict(data, country, 40, wealth, hh)
+  models[[paste0(country, "_40")]] <- result_40$model
+  data[[paste0("yhat_40_", country)]] <- NA
+  data[[paste0("yhat_40_", country)]][data$country == country] <- result_40$predictions
+
+  # 60th percentile
+  result_60 <- run_regression_and_predict(data, country, 60, wealth, hh)
+  models[[paste0(country, "_60")]] <- result_60$model
+  data[[paste0("yhat_60_", country)]] <- NA
+  data[[paste0("yhat_60_", country)]][data$country == country] <- result_60$predictions
+
+}
+
+# Export results
+# stargazer(models,
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(models, function(m) summary(m)$se[names(summary(m)$coefficients)])),
+#           add.lines = list(c("Observations", sapply(models, nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+# Clear models
+# rm(models)
+
+data$yhat_w20_sh_cons <- NA
+data$yhat_w40_sh_cons <- NA
+data$yhat_w60_sh_cons <- NA
+
+attr(data$yhat_w20_sh_cons, "label") <- "Predicted values basic PMT, weighted bottom 20"
+attr(data$yhat_w40_sh_cons, "label") <- "Predicted values basic PMT, weighted bottom 40"
+attr(data$yhat_w60_sh_cons, "label") <- "Predicted values basic PMT, weighted bottom 60"
+
+for (country in countries) {
+  data$yhat_w20_sh_cons[data$country == country] <- data[[paste0("yhat_20_", country)]][data$country == country]
+  data$yhat_w40_sh_cons[data$country == country] <- data[[paste0("yhat_40_", country)]][data$country == country]
+  data$yhat_w60_sh_cons[data$country == country] <- data[[paste0("yhat_60_", country)]][data$country == country]
+}
+
+data <- data %>% dplyr::select(-matches(paste0("yhat_[0-9]+_", country)))
+
+saveRDS(data, file = "../data/processed/04_data.RData")

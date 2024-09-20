@@ -1,0 +1,973 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   Replication of A Proxy Means Test
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+rm(list=ls())
+
+# libraries ----
+library(data.table)
+library(dplyr)
+library(haven)
+library(Hmisc)
+library(quantreg)
+library(sandwich)
+library(lmtest)
+library(fixest)
+library(broom)
+library(stargazer)
+library(MASS)
+library(quantreg)
+library(purrr)
+library(estimatr)
+library(tidyr)
+library(stringr)
+
+# data cleaning ----
+# Read the data
+data <- read_dta("PMT_ReplicationFiles_Stata/Brown_Ravallion_vandeWalle_PMT.dta")
+copy <- data
+initial_obs <- nrow(data)
+
+# Create household size categories
+data$hhsize_cat <- cut(data$hhsize, breaks = c(1, 3, 5, 7, 9, Inf), right = FALSE, labels = FALSE)
+data$hhsize_cat[data$hhsize >= 9] <- 9
+
+# Replace month for specific countries
+data$month[data$country %in% c("BurkinaFaso", "Ethiopia", "Malawi", "Mali", "Ghana")] <- 1
+
+# Generate population weight
+data$popweight1 <- data$hhweight * data$hhsize
+data$popweight1[is.na(data$popweight1)] <- data$popweight[is.na(data$popweight1)]
+
+# Calculate hhweight for Nigeria
+data$hhweight[data$country == "Nigeria"] <- data$popweight[data$country == "Nigeria"] / data$hhsize[data$country == "Nigeria"]
+
+# Drop observations with missing weights
+data <- data[!is.na(data$hhweight) & !is.na(data$popweight1), ]
+obs_after_weight_drop <- nrow(data)
+initial_obs - obs_after_weight_drop # correct
+
+# Check for missing EA by country
+table(data$country[is.na(data$EA)])
+
+# Replace missing values with 0 for specific variables
+vars <- c("share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm",
+          "share_widow", "share_disabledm", "share_disabledf", "share_orphanm", "share_orphanf")
+data[vars] <- lapply(data[vars], function(x) ifelse(is.na(x), 0, x))
+
+# Calculate mean consumption and below mean indicator
+data <- data %>%
+  group_by(country) %>%
+  mutate(mean_consump = wtd.mean(real_consumption_pc, weights = popweight1),
+         below_mean = as.numeric(real_consumption_pc <= mean_consump))
+
+# Replace consumption with NA for missing values in specified variables
+vars <- c("water_piped", "water_well", "toilet_flush", "toilet_pit", "floor_finish", "wall_finish",
+          "roof_finish", "members_per_room", "kitchen_room", "fuel_elecgas", "fuel_charcoal",
+          "electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "telephone",
+          "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron",
+          "satelite", "generator", "own_house", "urban", "female_head", "edu_head_primary",
+          "edu_head_secondary", "max_edu_primary", "max_edu_secondary", "div_sep_head",
+          "widow_head", "nevermar_head", "work_paid_head", "work_selfemp_nonf_head",
+          "work_daily_head", "share_05f", "share_05m", "share_614f", "share_614m",
+          "share_65plusf", "share_65plusm", "muslim", "christian", "month", "age_head_cat",
+          "hhsize_cat")
+
+for (var in vars) {
+  data$real_consumption_pc[is.na(data[[var]])] <- NA
+}
+
+# Drop observations with NA in real_consumption_pc
+data <- data[!is.na(data$real_consumption_pc), ]
+final_obs <- nrow(data)
+obs_after_weight_drop - final_obs # correct 1942 dropped
+
+# Generate log of real consumption per capita
+data$consump <- log(data$real_consumption_pc)
+
+# Summarize consump by country
+consump_summary <- data %>%
+  group_by(country) %>%
+  summarise(mean_consump = mean(consump, na.rm = TRUE),
+            sd_consump = sd(consump, na.rm = TRUE),
+            min_consump = min(consump, na.rm = TRUE),
+            max_consump = max(consump, na.rm = TRUE))
+print(consump_summary)
+
+# Drop consumption_pctile if it exists
+data$consumption_pctile <- NULL
+
+# Generate consumption percentiles by country
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+for (country in countries) {
+  country_data <- data[data$country == country & !is.na(data$consump), ]
+  percentiles <- wtd.quantile(country_data$consump, weights = country_data$hhweight, probs = seq(0.01, 1, 0.01))
+  data$consumption_pctile[data$country == country] <- findInterval(data$consump[data$country == country], percentiles) + 1
+}
+
+# Define variable groups for Table A1
+wealth_vars <- c("real_consumption_pc", "water_piped", "water_well", "toilet_flush", "toilet_pit",
+                 "floor_natural", "floor_rudiment", "floor_finish", "wall_natural", "wall_rudiment",
+                 "wall_finish", "roof_natural", "roof_rudiment", "roof_finish", "members_per_room",
+                 "kitchen_room", "fuel_elecgas", "fuel_charcoal", "fuel_wood")
+
+asset_vars <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "telephone",
+                "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron",
+                "satelite", "generator", "own_house")
+
+hh_vars <- c("urban", "age_head", "female_head", "edu_head_primary", "edu_head_secondary",
+             "max_edu_primary", "max_edu_secondary", "ever_married_head", "married_head",
+             "div_sep_head", "widow_head", "nevermar_head", "hhsize", "work_paid_head",
+             "work_selfemp_nonf_head", "work_selfemp_farm_head", "work_daily_head", "muslim",
+             "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_1564f",
+             "share_1564m", "share_65plusf", "share_65plusm", "share_widow", "share_disabledm",
+             "share_disabledf", "share_orphanm", "share_orphanf")
+
+# Combine all variables
+all_vars <- c(wealth_vars, asset_vars, hh_vars)
+
+# Calculate weighted means for all variables by country
+summary_stats <- data %>%
+  group_by(country) %>%
+  summarise(across(all_of(all_vars),
+                   ~weighted.mean(., w = hhweight, na.rm = TRUE),
+                   .names = "mean_{.col}")) %>%
+  ungroup()
+
+# Format the results to 3 decimal places
+summary_stats <- summary_stats %>%
+  mutate(across(-country, ~round(., 3)))
+
+# Print the results
+print(summary_stats) #appendix A1?
+
+list = ls()
+keep = c("data", "countries")
+rm(list=setdiff(list,keep))
+
+# main analysis ----
+
+# Generate poverty lines (in log terms)
+data <- data %>%
+  group_by(country) %>%
+  mutate(
+    pov_line_20 = max(consump[consumption_pctile == 20], na.rm = TRUE),
+    pov_line_40 = max(consump[consumption_pctile == 40], na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Add variable labels
+attr(data$pov_line_20, "label") <- "Poverty line 20 percent"
+attr(data$pov_line_40, "label") <- "Poverty line 40 percent"
+
+# Generate poverty rates pre-transfers
+data <- data %>%
+  mutate(
+    poor_20 = ifelse(!is.na(consump), ifelse(consump <= pov_line_20, 1, 0), NA),
+    poor_40 = ifelse(!is.na(consump), ifelse(consump <= pov_line_40, 1, 0), NA)
+  )
+
+# Add variable labels
+attr(data$poor_20, "label") <- "Poor (in 20th pctile)"
+attr(data$poor_40, "label") <- "Poor (in 40th pctile)"
+
+# Check poverty rates
+poverty_rates <- data %>%
+  group_by(country) %>%
+  summarise(
+    poor_20_rate = weighted.mean(poor_20, hhweight, na.rm = TRUE),
+    poor_40_rate = weighted.mean(poor_40, hhweight, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 3)))
+
+print(poverty_rates)
+
+# Save the data
+# write_dta(data, "Brown_Ravallion_vandeWalle_PMT.dta")
+
+# section 4 ----
+# Create yhat_pmt_sh_consump column
+data$yhat_pmt_sh_consump <- NA
+attr(data$yhat_pmt_sh_consump, "label") <- "Predicted values short PMT"
+
+# Define variable groups
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+
+# Function to run regression for each country, removing constant variables since run into error otherwise
+run_regression <- function(country_name) {
+  country_data <- filter(data, country == country_name)
+
+  # Create factor variables
+  country_data$hhsize_cat <- factor(country_data$hhsize_cat)
+  country_data$age_head_cat <- factor(country_data$age_head_cat)
+  country_data$state <- factor(country_data$state)
+  country_data$month <- factor(country_data$month)
+
+  # Remove factors with only one level
+  factors_to_include <- sapply(country_data[c("hhsize_cat", "age_head_cat", "state", "month")], function(x) length(levels(x)) > 1)
+  factor_vars <- names(factors_to_include)[factors_to_include]
+
+  # Construct formula
+  formula_vars <- c(wealth, hh, paste0("factor(", factor_vars, ")"))
+  formula <- as.formula(paste("consump ~", paste(formula_vars, collapse = " + ")))
+
+  # Run regression
+  model <- lm(formula, data = country_data)
+
+  # Generate predictions
+  predictions <- predict(model)
+  data$yhat_pmt_sh_consump[data$country == country_name] <<- predictions
+
+  return(model)
+}
+
+# Run regressions for each country
+models <- lapply(countries, run_regression)
+
+# Create summary table
+summary_table <- do.call(rbind, lapply(models, function(m) {
+  tidy(m) %>%
+    filter(term %in% c(wealth, hh)) %>%
+    dplyr::select(term, estimate, std.error, statistic, p.value)
+}))
+
+# Export results
+# stargazer(models,
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(models, function(m) sqrt(diag(vcovHC(m, type = "HC1"))))),
+#           add.lines = list(c("Observations", sapply(models, nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+# OLS and Probit ----
+depvars <- c("poor_20", "poor_40")
+
+# Create new variables
+for (x in depvars) {
+  data[[paste0("yhat_pmt_sh_", x)]] <- NA
+  data[[paste0("yhat_pmt_sh_pr_", x)]] <- NA
+  attr(data[[paste0("yhat_pmt_sh_", x)]], "label") <- paste("Predicted consumption", x)
+  attr(data[[paste0("yhat_pmt_sh_pr_", x)]], "label") <- paste("Predicted consumption probit", x)
+}
+
+# Define variable groups
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+
+# Define countries
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to run regression for each country and model type
+run_regression <- function(country_name, dep_var, model_type = "ols") {
+  country_data <- filter(data, country == country_name)
+
+  # Create factor variables
+  country_data$hhsize_cat <- factor(country_data$hhsize_cat)
+  country_data$age_head_cat <- factor(country_data$age_head_cat)
+  country_data$state <- factor(country_data$state)
+  country_data$month <- factor(country_data$month)
+
+  # Remove factors with only one level
+  factors_to_include <- sapply(country_data[c("hhsize_cat", "age_head_cat", "state", "month")], function(x) length(levels(x)) > 1)
+  factor_vars <- names(factors_to_include)[factors_to_include]
+
+  # Construct formula
+  formula_vars <- c(wealth, hh, paste0("factor(", factor_vars, ")"))
+  formula <- as.formula(paste(dep_var, "~", paste(formula_vars, collapse = " + ")))
+
+  # Run regression
+  if (model_type == "ols") {
+    model <- lm(formula, data = country_data)
+    predictions <- predict(model)
+    data[[paste0("yhat_pmt_sh_", dep_var)]][data$country == country_name] <<- predictions
+  } else if (model_type == "probit") {
+    model <- glm(formula, family = binomial(link = "probit"), data = country_data)
+    predictions <- predict(model, type = "response")
+    data[[paste0("yhat_pmt_sh_pr_", dep_var)]][data$country == country_name] <<- predictions
+  }
+
+  return(model)
+}
+
+# Run regressions for each country and dependent variable - takes slightly long
+models_ols <- list()
+models_probit <- list()
+r_squared_probit <- list()
+
+for (dep_var in depvars) {
+  for (country in countries) {
+    # OLS
+    models_ols[[paste(dep_var, country)]] <- run_regression(country, dep_var, "ols")
+
+    # Probit
+    probit_model <- run_regression(country, dep_var, "probit")
+    models_probit[[paste(dep_var, country)]] <- probit_model
+
+    # Store pseudo R-squared for probit
+    r_squared_probit[[paste(dep_var, country)]] <- with(summary(probit_model), 1 - deviance/null.deviance)
+  }
+}
+
+# Create summary tables
+summary_table_ols <- do.call(rbind, lapply(models_ols, function(m) {
+  tidy(m) %>%
+    filter(term %in% c(wealth, hh)) %>%
+    dplyr::select(term, estimate, std.error, statistic, p.value)
+}))
+
+summary_table_probit <- do.call(rbind, lapply(models_probit, function(m) {
+  tidy(m) %>%
+    filter(term %in% c(wealth, hh)) %>%
+    dplyr::select(term, estimate, std.error, statistic, p.value)
+}))
+
+# Export results
+# stargazer(c(models_ols, models_probit),
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(c(models_ols, models_probit), function(m) sqrt(diag(vcovHC(m, type = "HC1"))))),
+#           add.lines = list(c("Observations", sapply(c(models_ols, models_probit), nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+# Print pseudo R-squared for probit models
+for (dep_var in depvars) {
+  for (country in countries) {
+    cat("Pseudo R-squared for", dep_var, "in", country, ":",
+        r_squared_probit[[paste(dep_var, country)]], "\n")
+  }
+}
+
+# quantile reg ----
+
+nums <- c("20", "40", "50")
+
+# Create new variables for predicted values
+for (num in nums) {
+  data[[paste0("yhat_pmt_sh_qr", num, "_cons")]] <- NA
+  attr(data[[paste0("yhat_pmt_sh_qr", num, "_cons")]], "label") <- paste("Predicted values quantile reg short PMT", num)
+}
+
+# Define variable groups
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+
+# Define countries
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Convert data to data.table for faster operations
+setDT(data)
+
+# Create formula
+formula <- as.formula(paste("consump ~",
+                            paste(c(wealth, hh,
+                                    "factor(hhsize_cat)", "factor(age_head_cat)",
+                                    "factor(state)", "factor(month)"),
+                                  collapse = " + ")))
+
+# Run quantile regressions - takes slightly long
+models <- list()
+for (num in nums) {
+  for (country in countries) {
+    # Subset data for the current country
+    country_data <- data[country == country]
+
+    # Run quantile regression with "fn" method
+    model <- try(rq(formula, tau = as.numeric(paste0("0.", num)),
+                    data = country_data,
+                    method = "fn"))
+
+    if (!inherits(model, "try-error")) {
+      models[[paste(num, country, sep = "_")]] <- model
+
+      # Generate predictions
+      predictions <- predict(model, newdata = country_data)
+
+      # Update the main dataset
+      data[country == country, paste0("yhat_pmt_sh_qr", num, "_cons") := predictions]
+    }
+  }
+}
+saveRDS()
+
+# Create summary table - takes a while currently
+# summary_table <- do.call(rbind, lapply(models, function(m) {
+#   tidy(m) %>%
+#     filter(term %in% c(wealth, hh)) %>%
+#     dplyr::select(term, estimate, std.error, statistic, p.value)
+# }))
+
+# Export results
+# stargazer(models,
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(models, function(m) summary(m, se = "nid")$coefficients[, 2])),
+#           add.lines = list(c("Observations", sapply(models, nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+# Clear stored estimates (similar to Stata's eststo clear)
+rm(models)
+
+# basic weighted regression ----
+
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to run regression and predict
+run_regression_and_predict <- function(data, country, pctile, wealth, hh) {
+  # Subset data
+  subset_data <- data %>%
+    filter(country == !!country, consumption_pctile <= pctile)
+
+  # Create formula
+  all_vars <- c(wealth, hh, "hhsize_cat", "age_head_cat", "state", "month")
+
+  # Check for variables with more than one level
+  valid_vars <- sapply(all_vars, function(v) {
+    if (v %in% c("hhsize_cat", "age_head_cat", "state", "month")) {
+      length(unique(subset_data[[v]])) > 1
+    } else {
+      TRUE  # Keep all non-factor variables
+    }
+  })
+
+  # Create formula with only valid variables
+  formula_vars <- c(all_vars[valid_vars])
+  formula <- as.formula(paste("consump ~", paste(formula_vars, collapse = " + ")))
+
+  # Run regression
+  model <- feols(formula, data = subset_data, cluster = ~EA)
+
+  # Generate predictions
+  predictions <- predict(model, newdata = data %>% filter(country == !!country))
+
+  list(model = model, predictions = predictions)
+}
+
+# Main analysis loop
+models <- list()
+for (country in countries) {
+
+  # 20th percentile
+  result_20 <- run_regression_and_predict(data, country, 20, wealth, hh)
+  models[[paste0(country, "_20")]] <- result_20$model
+  data[[paste0("yhat_20_", country)]] <- NA
+  data[[paste0("yhat_20_", country)]][data$country == country] <- result_20$predictions
+
+  # 40th percentile
+  result_40 <- run_regression_and_predict(data, country, 40, wealth, hh)
+  models[[paste0(country, "_40")]] <- result_40$model
+  data[[paste0("yhat_40_", country)]] <- NA
+  data[[paste0("yhat_40_", country)]][data$country == country] <- result_40$predictions
+
+  # 60th percentile
+  result_60 <- run_regression_and_predict(data, country, 60, wealth, hh)
+  models[[paste0(country, "_60")]] <- result_60$model
+  data[[paste0("yhat_60_", country)]] <- NA
+  data[[paste0("yhat_60_", country)]][data$country == country] <- result_60$predictions
+
+}
+
+# Export results
+# stargazer(models,
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(models, function(m) summary(m)$se[names(summary(m)$coefficients)])),
+#           add.lines = list(c("Observations", sapply(models, nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+# Clear models
+# rm(models)
+
+data$yhat_w20_sh_cons <- NA
+data$yhat_w40_sh_cons <- NA
+data$yhat_w60_sh_cons <- NA
+
+attr(data$yhat_w20_sh_cons, "label") <- "Predicted values basic PMT, weighted bottom 20"
+attr(data$yhat_w40_sh_cons, "label") <- "Predicted values basic PMT, weighted bottom 40"
+attr(data$yhat_w60_sh_cons, "label") <- "Predicted values basic PMT, weighted bottom 60"
+
+for (country in countries) {
+  data$yhat_w20_sh_cons[data$country == country] <- data[[paste0("yhat_20_", country)]][data$country == country]
+  data$yhat_w40_sh_cons[data$country == country] <- data[[paste0("yhat_40_", country)]][data$country == country]
+  data$yhat_w60_sh_cons[data$country == country] <- data[[paste0("yhat_60_", country)]][data$country == country]
+}
+
+data <- data %>% dplyr::select(-matches(paste0("yhat_[0-9]+_", country)))
+
+# adult equiv exp ----
+
+# No adult equivalence for Burkina, Mali, Nigeria
+
+# Equivalent to tabstat in Stata
+summary_stats <- data %>%
+  group_by(country) %>%
+  summarise(
+    mean = mean(real_consumption_ae, na.rm = TRUE),
+    sd = sd(real_consumption_ae, na.rm = TRUE),
+    min = min(real_consumption_ae, na.rm = TRUE),
+    max = max(real_consumption_ae, na.rm = TRUE)
+  )
+print(summary_stats)
+
+# Generate log of real consumption
+data <- data %>%
+  mutate(consump_ae = log(real_consumption_ae))
+
+# Label variable (using labelled package for Stata-like labels)
+data$consump_ae <- labelled::set_variable_labels(data$consump_ae, "Log real consumption adult equivalent")
+
+# Generate new variable
+data$yhat_pmt_sh_ae_consump <- NA_real_
+data$yhat_pmt_sh_ae_consump <- labelled::set_variable_labels(data$yhat_pmt_sh_ae_consump, "Predicted values quantile reg short PMT")
+
+# Define variables
+# wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+# hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+
+# Clear
+keep_objects <- c("data", "hh", "wealth", "countries")
+
+# Step 2: Identify all objects currently in the environment
+all_objects <- ls()
+
+# Step 3: Remove objects that are not in the 'keep_objects' list
+rm(list = setdiff(all_objects, keep_objects))
+
+countries <- c("Ethiopia", "Ghana", "Malawi", "Niger", "Tanzania", "Uganda")
+
+# Loop through countries - unstable
+for (x in countries) {
+  # Subset data for the current country
+  country_data <- data[country == x]
+
+  # Identify variables with more than one level
+  check_cols <- c(wealth, hh, "hhsize_cat", "age_head_cat", "state", "month")
+  valid_vars <- sapply(check_cols, function(col) length(unique(country_data[[col]])) > 1)
+
+  # Create formula only with valid variables
+  valid_terms <- c(wealth[valid_vars[wealth]],
+                   hh[valid_vars[hh]],
+                   if(valid_vars["hhsize_cat"]) "factor(hhsize_cat)" else NULL,
+                   if(valid_vars["age_head_cat"]) "factor(age_head_cat)" else NULL,
+                   if(valid_vars["state"]) "factor(state)" else NULL,
+                   if(valid_vars["month"]) "factor(month)" else NULL)
+
+  formula <- as.formula(paste("consump_ae ~", paste(valid_terms, collapse = " + ")))
+
+  # Run regression
+  model <- tryCatch({
+    lm_robust(formula, data = country_data, clusters = EA)
+  }, error = function(e) {
+    warning(paste("Error in regression for country", x, ":", e$message))
+    return(NULL)
+  })
+
+  if (!is.null(model)) {
+    # Store estimates
+    assign(paste0("est_", x), model)
+
+    # Predict and replace values
+    predictions <- predict(model, newdata = country_data)
+    data[country == x, yhat_pmt_sh_ae_consump := predictions]
+  }
+}
+
+# Export results
+results <- map_df(countries, function(x) {
+  model <- get(paste0("est_", x))
+  tidy(model) %>%
+    filter(term %in% c(wealth, hh)) %>%
+    mutate(country = x)
+})
+
+# write.csv(results, "results.csv", row.names = FALSE)
+
+# Clear stored estimates
+rm(list = ls(pattern = "^est"))
+
+# Drop consump_ae
+data <- data %>% dplyr::select(-consump_ae)
+
+# Separate for urban rural
+data$yhat_pmt_sh_urb_consump <- NA_real_
+data$yhat_pmt_sh_urb_consump <- labelled::set_variable_labels(data$yhat_pmt_sh_urb_consump, "Predicted values urban/rural short PMT")
+
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+results_list <- list()
+
+# Loop through urban/rural and countries
+for (num in 0:1) {
+  for (x in countries) {
+    # Subset data
+    subset_data <- data[country == x & urban == num]
+
+    # Create formula
+    formula_terms <- c(wealth, hh, "factor(hhsize_cat)", "factor(age_head_cat)", "factor(state)", "factor(month)")
+    formula <- as.formula(paste("consump ~", paste(formula_terms, collapse = " + ")))
+
+    # Run regression
+    model <- tryCatch({
+      lm_robust(formula, data = subset_data, clusters = ~ EA)
+    }, error = function(e) {
+      warning(paste("Error in regression for country", x, "and urban", num, ":", e$message))
+      return(NULL)
+    })
+
+    if (!is.null(model)) {
+      # Store estimates
+      assign(paste0("est_", x, "_", num), model)
+
+      # Predict and replace values
+      predictions <- predict(model, newdata = subset_data)
+      data[country == x & urban == num, yhat_pmt_sh_urb_consump := predictions]
+
+      # Store results for later output
+      results_list[[paste0(x, "_", num)]] <- tidy(model) %>%
+        filter(term %in% c(wealth, hh)) %>%
+        mutate(country = x, urban = num)
+    }
+  }
+}
+
+# Combine all results
+results <- do.call(rbind, results_list)
+
+# Write results to CSV
+# write.csv(results, "results.csv", row.names = FALSE)
+
+# Clear stored estimates
+rm(list = ls(pattern = "^est"))
+
+# Create a data frame with all combinations of country and urban
+combinations <- expand.grid(country = countries, urban = 0:1) %>%
+  arrange(urban, country)
+
+# Use map_df with .id parameter to iterate over rows
+results_urban_rural <- map_df(seq_len(nrow(combinations)), function(i) {
+  row <- combinations[i, ]
+  model_name <- paste0("est_", row$country, "_", row$urban)
+
+  # Check if the model exists
+  if (exists(model_name)) {
+    model <- get(model_name)
+    tidy(model) %>%
+      filter(term %in% c(wealth, hh)) %>%
+      mutate(country = row$country, urban = row$urban)
+  } else {
+    # Return an empty data frame if the model doesn't exist
+    data.frame()
+  }
+}, .id = "row_id")
+
+# Remove the row_id column if you don't need it
+results_urban_rural <- results_urban_rural %>% dplyr::select(-row_id)
+
+# write.csv(results_urban_rural, "results_urban_rural.csv", row.names = FALSE)
+
+# Clear stored estimates
+# rm(list = ls(pattern = "^est"))
+
+# extended regression ----
+
+setDT(data)
+copy <- data
+
+# Generate new variables
+data[, ':=' (
+  female_head_widow = 0,
+  female_head_div = 0,
+  female_head_nevermar = 0
+)]
+
+# Replace values
+data[female_head == 1 & widow_head == 1, female_head_widow := 1]
+data[female_head == 1 & div_sep_head == 1, female_head_div := 1]
+data[female_head == 1 & nevermar_head == 1, female_head_nevermar := 1]
+
+# Label variables
+data[, ':=' (
+  female_head_widow = labelled::set_variable_labels(female_head_widow, "Widowed female head"),
+  female_head_div = labelled::set_variable_labels(female_head_div, "Divorced female head"),
+  female_head_nevermar = labelled::set_variable_labels(female_head_nevermar, "Never married female head")
+)]
+
+# Generate new variable for predictions
+data[, yhat_pmt_ext_consump := as.numeric(NA)]
+data[, yhat_pmt_ext_consump := labelled::set_variable_labels(yhat_pmt_ext_consump, "Predicted values extended PMT")]
+
+# Define variables
+wealth <- c("water_piped", "water_well", "toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "members_per_room", "kitchen_room", "fuel_elecgas", "fuel_charcoal")
+assets <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "telephone", "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron", "satelite", "generator", "own_house")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "max_edu_primary", "max_edu_secondary", "div_sep_head", "widow_head", "nevermar_head", "female_head_widow", "female_head_div", "female_head_nevermar", "work_paid_head", "work_selfemp_nonf_head", "work_daily_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm", "share_widow", "share_disabledm", "share_disabledf", "share_orphanm", "share_orphanf")
+
+# Clear any existing stored estimates
+rm(list = ls(pattern = "^est"))
+
+models <- list()
+
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+for (x in countries) {
+  # Create formula
+  formula_terms <- c(wealth, assets, hh, "i(hhsize_cat)", "i(age_head_cat)", "i(state)", "i(month)")
+  formula <- as.formula(paste("consump ~", paste(formula_terms, collapse = " + ")))
+
+  # Run regression
+  model <- feols(formula, data = data[country == x], cluster = ~EA)
+
+  # Store model
+  models[[x]] <- model
+
+  # Predict and replace values
+  yhat <- predict(model)
+  data[country == x, yhat_pmt_ext_consump := yhat]
+}
+
+# Export results
+# modelsummary(models,
+#              output = "results_extended.csv",
+#              fmt = "%.3f",
+#              stars = c('*' = .1, '**' = .05, '***' = .01),
+#              coef_omit = -c(wealth, assets, hh),
+#              gof_map = c("nobs", "r.squared"),
+#              type = "html")
+
+# Clear stored estimates
+# rm(list = ls(pattern = "^est"))
+
+# quantile regression extended model  ----
+
+nums <- c("20", "40", "50")
+wealth <- c("water_piped", "water_well", "toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "members_per_room", "kitchen_room", "fuel_elecgas", "fuel_charcoal")
+assets <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "telephone", "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron", "satelite", "generator", "own_house")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "max_edu_primary", "max_edu_secondary", "div_sep_head", "widow_head", "nevermar_head", "female_head_widow", "female_head_div", "female_head_nevermar", "work_paid_head", "work_selfemp_nonf_head", "work_daily_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm", "share_widow", "share_disabledm", "share_disabledf", "share_orphanm", "share_orphanf")
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to run quantile regression and update predictions
+run_qreg <- function(data, num, country) {
+  formula <- as.formula(paste("consump ~", paste(c(wealth, assets, hh, "factor(hhsize_cat)", "factor(age_head_cat)", "factor(state)", "factor(month)"), collapse = " + ")))
+
+  model <- rq(formula, data = data[data$country == country,], tau = as.numeric(paste0("0.", num)))
+
+  predictions <- predict(model, newdata = data[data$country == country,])
+  data[data$country == country, paste0("yhat_pmt_ex_qr", num, "_cons")] <- predictions
+
+  return(list(data = data, model = model))
+}
+
+# Initialize results list
+results <- list()
+
+# Run quantile regression for each combination - slow
+for (num in nums) {
+  # Initialize or update the prediction column
+  data[[paste0("yhat_pmt_ex_qr", num, "_cons")]] <- NA
+  attr(data[[paste0("yhat_pmt_ex_qr", num, "_cons")]], "label") <- "Predicted values quantile reg extended PMT"
+
+  for (country in countries) {
+    result <- run_qreg(data, num, country)
+    data <- result$data
+    results[[paste(num, country, sep = "_")]] <- result$model
+  }
+}
+
+# Export results
+# stargazer(results, type = "text", out = "results.csv",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digit.separator = "",
+#           dep.var.labels = "Consumption",
+#           coef = list(NA),
+#           se = list(NA),
+#           omit.stat = c("f", "ser"),
+#           add.lines = list(c("Observations", sapply(results, function(x) nobs(x)))))
+
+# weighted regressions for extended model ----
+
+# Define variable groups
+wealth <- c("water_piped", "water_well", "toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "members_per_room", "kitchen_room", "fuel_elecgas", "fuel_charcoal")
+assets <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "telephone", "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron", "satelite", "generator", "own_house")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "max_edu_primary", "max_edu_secondary", "div_sep_head", "widow_head", "nevermar_head", "female_head_widow", "female_head_div", "female_head_nevermar", "work_paid_head", "work_selfemp_nonf_head", "work_daily_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm", "share_widow", "share_disabledm", "share_disabledf", "share_orphanm", "share_orphanf")
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to run regression and predict
+run_regression_and_predict <- function(data, country, percentile) {
+  # Filter data
+  filtered_data <- data %>%
+    filter(country == !!country, consumption_pctile <= percentile)
+
+  # Prepare formula
+  predictors <- c(wealth, assets, hh, "hhsize_cat", "age_head_cat", "state", "month")
+  formula_str <- paste("consump ~", paste(c(wealth, assets, hh), collapse = " + "),
+                       "+ factor(hhsize_cat) + factor(age_head_cat) + factor(state) + factor(month)")
+  formula <- as.formula(formula_str)
+
+  # Run regression
+  model <- tryCatch({
+    lm_robust(formula, data = filtered_data, clusters = EA)
+  }, error = function(e) {
+    warning(paste("Error in regression for", country, "at percentile", percentile, ":", conditionMessage(e)))
+    return(NULL)
+  })
+
+  if (is.null(model)) return(list(data = data, model = NULL))
+
+  # Predict for all observations of the country
+  predictions <- predict(model, newdata = data %>% filter(country == !!country))
+
+  # Add predictions to the original dataset
+  updated_data <- data %>%
+    mutate(!!paste0("yhat_", percentile, "_", country) := if_else(country == !!country, predictions, NA_real_))
+
+  return(list(data = updated_data, model = model))
+}
+
+# Run regressions and predictions for each country and percentile
+results <- list()
+for (country in countries) {
+  for (percentile in c(20, 40, 60)) {
+    cat(paste("Processing", country, "at percentile", percentile, "\n"))
+    result <- run_regression_and_predict(data, country, percentile)
+    data <- result$data
+    if (!is.null(result$model)) {
+      results[[paste0(country, "_", percentile)]] <- result$model
+    }
+  }
+}
+
+# Function to extract and format regression results
+extract_results <- function(model) {
+  tidy(model) %>%
+    filter(term %in% c(wealth, assets, hh)) %>%
+    mutate(estimate = sprintf("%.3f", estimate),
+           std.error = sprintf("%.3f", std.error),
+           p.value = case_when(
+             p.value < 0.01 ~ paste0(estimate, "***"),
+             p.value < 0.05 ~ paste0(estimate, "**"),
+             p.value < 0.1 ~ paste0(estimate, "*"),
+             TRUE ~ estimate
+           )) %>%
+    select(term, p.value, std.error)
+}
+
+# Extract and combine results
+all_results <- map_dfr(results, extract_results, .id = "model") %>%
+  pivot_wider(names_from = model, values_from = c(p.value, std.error))
+
+# Write results to CSV
+# write.csv(all_results, "results.csv", row.names = FALSE)
+
+# Create yhat variables
+data <- data %>%
+  mutate(
+    yhat_w20_cons = NA_real_,
+    yhat_w40_cons = NA_real_,
+    yhat_w60_cons = NA_real_
+  )
+
+# Set variable labels
+attr(data$yhat_w20_cons, "label") <- "Predicted values extended PMT, weighted bottom 20"
+attr(data$yhat_w40_cons, "label") <- "Predicted values extended PMT, weighted bottom 40"
+attr(data$yhat_w60_cons, "label") <- "Predicted values extended PMT, weighted bottom 60"
+
+# Replace yhat values for each country
+for (x in countries) {
+  data <- data %>%
+    mutate(
+      yhat_w20_cons = if_else(country == x, get(paste0("yhat_20_", x)), yhat_w20_cons),
+      yhat_w40_cons = if_else(country == x, get(paste0("yhat_40_", x)), yhat_w40_cons),
+      yhat_w60_cons = if_else(country == x, get(paste0("yhat_60_", x)), yhat_w60_cons)
+    ) %>%
+    select(-matches(paste0("yhat_(20|40|60)_", x)))
+}
+
+# stepwise regression ----
+# Create new variables
+data <- data %>%
+  mutate(
+    age_head_sq = age_head^2,
+    loghhsize = log(hhsize)
+  )
+# data <- data %>%
+#   filter(complete.cases(.))
+# Define variable groups
+wealth <- c("water_piped", "water_well", "toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "members_per_room", "kitchen_room", "fuel_elecgas", "fuel_charcoal")
+assets <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron", "satelite", "generator", "own_house")
+hh <- c("urban", "loghhsize", "age_head", "age_head_sq", "female_head", "edu_head_primary", "edu_head_secondary", "max_edu_primary", "max_edu_secondary", "div_sep_head", "widow_head", "nevermar_head", "female_head_widow", "female_head_div", "female_head_nevermar", "work_paid_head", "work_selfemp_nonf_head", "work_daily_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm", "share_widow", "share_disabledm", "share_disabledf", "share_orphanm", "share_orphanf")
+
+# Define countries
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to perform stepwise regression
+stepwise_regression <- function(data, country) {
+  # Subset data for the specific country
+  country_data <- data %>%
+    filter(country == !!country) %>%
+    dplyr::select(all_of(c(wealth, assets, hh, "consump"))) %>%
+    filter(complete.cases(.))
+
+  if (nrow(country_data) == 0) {
+    warning(paste("No complete cases for country:", country))
+    return(NULL)
+  }
+
+  # Prepare formula
+  all_vars <- c(wealth, assets, hh)
+  available_vars <- intersect(all_vars, names(country_data))
+  formula <- as.formula(paste("consump ~", paste(available_vars, collapse = " + ")))
+
+  # Perform stepwise regression
+  tryCatch({
+    step_model <- stepAIC(lm(formula, data = country_data), direction = "both", k = qchisq(0.01, 1, lower.tail = FALSE))
+    predictions <- predict(step_model, newdata = country_data)
+    list(model = step_model, predictions = predictions)
+  }, error = function(e) {
+    warning(paste("Error in stepwise regression for country:", country, "-", e$message))
+    NULL
+  })
+}
+
+# Perform stepwise regression for each country
+results <- map(countries, ~stepwise_regression(data, .x))
+
+# Update yhat_step_consump in the original dataset
+for (i in seq_along(countries)) {
+  data <- data %>%
+    mutate(yhat_step_consump = if_else(country == countries[i], results[[i]]$predictions, yhat_step_consump))
+}
+
+# Extract and combine results
+all_results <- map_dfr(results, ~tidy(.x$model), .id = "country") %>%
+  mutate(country = countries[as.numeric(country)])
+
+
+
+
+
+
+
+
+
+
+
+

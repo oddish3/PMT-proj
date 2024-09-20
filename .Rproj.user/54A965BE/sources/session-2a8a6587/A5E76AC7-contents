@@ -1,0 +1,149 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   stepwise regression
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+rm(list=ls())
+
+# libraries ----
+library(dplyr)
+library(purrr)
+library(broom)
+library(sandwich)
+
+data <- readRDS(file = "data/processed/08_data.RData")
+
+# Create new variables
+data <- data %>%
+  mutate(
+    age_head_sq = age_head^2,
+    loghhsize = log(hhsize)
+  )
+
+# Define variable groups
+wealth <- c("water_piped", "water_well", "toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "members_per_room", "kitchen_room", "fuel_elecgas", "fuel_charcoal")
+assets <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike", "car", "mobile_phone", "computer", "video", "stove_any", "sew_machine", "aircon", "iron", "satelite", "generator", "own_house")
+hh <- c("urban", "loghhsize", "age_head", "age_head_sq", "female_head", "edu_head_primary", "edu_head_secondary", "max_edu_primary", "max_edu_secondary", "div_sep_head", "widow_head", "nevermar_head", "female_head_widow", "female_head_div", "female_head_nevermar", "work_paid_head", "work_selfemp_nonf_head", "work_daily_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm", "share_widow", "share_disabledm", "share_disabledf", "share_orphanm", "share_orphanf")
+categorical <- c("hhsize_cat", "age_head_cat", "state")  # Removed 'month' as per Stata script
+
+# Define countries
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to create dummy variables
+create_dummies <- function(data, var) {
+  levels <- unique(data[[var]])
+  if (length(levels) > 1) {
+    dummies <- model.matrix(~ data[[var]] - 1)
+    colnames(dummies) <- paste0(var, "_", levels)
+    dummies <- as.data.frame(dummies)
+    dummies <- dummies[, -1, drop = FALSE]  # Remove first dummy to avoid perfect collinearity
+    return(dummies)
+  } else {
+    return(NULL)
+  }
+}
+
+# Custom forward stepwise function
+forward_stepwise <- function(data, criterion = "p", threshold = 0.01) {
+  y <- data$consump
+  X <- as.matrix(data[, !(names(data) %in% c("consump", "EA"))])
+  n <- nrow(X)
+  p <- ncol(X)
+
+  included <- rep(FALSE, p)
+
+  while(TRUE) {
+    best_pval <- Inf
+    best_var <- NULL
+
+    for (j in 1:p) {
+      if (!included[j]) {
+        model <- lm(y ~ X[, included | (1:p == j)])
+        pval <- summary(model)$coefficients[nrow(summary(model)$coefficients), 4]
+        if (pval < best_pval) {
+          best_pval <- pval
+          best_var <- j
+        }
+      }
+    }
+
+    if (best_pval > threshold) break
+
+    included[best_var] <- TRUE
+  }
+
+  final_model <- lm(y ~ X[, included])
+  return(list(model = final_model, included = included))
+}
+
+# Function to perform stepwise regression for each country
+stepwise_regression <- function(data, country) {
+  # Subset data for the specific country
+  country_data <- data %>%
+    filter(country == !!country) %>%
+    dplyr::select(all_of(c(wealth, assets, hh, categorical, "consump", "EA"))) %>%
+    filter(complete.cases(.))
+
+  if (nrow(country_data) == 0) {
+    warning(paste("No complete cases for country:", country))
+    return(NULL)
+  }
+
+  # Create dummy variables for categorical variables
+  for (var in categorical) {
+    dummies <- create_dummies(country_data, var)
+    if (!is.null(dummies)) {
+      country_data <- cbind(country_data, dummies)
+    }
+  }
+
+  # Remove original categorical variables
+  country_data <- country_data %>% dplyr::select(-all_of(categorical))
+
+  # Debugging: Print column names and dimensions
+  print(paste("Number of columns in country_data:", ncol(country_data)))
+  print(paste("Column names:", paste(names(country_data), collapse=", ")))
+
+  # Perform forward stepwise regression
+  tryCatch({
+    result <- forward_stepwise(country_data)
+
+    # Debugging: Print model summary
+    print(summary(result$model))
+
+    # Get clustered standard errors
+    clustered_se <- sqrt(diag(vcovHC(result$model, type = "HC1", cluster = country_data$EA)))
+
+    # Prepare results
+    coef_summary <- summary(result$model)$coefficients
+    coef_summary[, "Std. Error"] <- clustered_se
+    coef_summary[, "t value"] <- coef_summary[, "Estimate"] / clustered_se
+    coef_summary[, "Pr(>|t|)"] <- 2 * pt(abs(coef_summary[, "t value"]), df = result$model$df.residual, lower.tail = FALSE)
+
+    # Make predictions
+    predictions <- predict(result$model, newdata = country_data)
+
+    list(model = result$model, predictions = predictions, coef_summary = coef_summary)
+  }, error = function(e) {
+    print(paste("Error in stepwise regression for country", country, ":", e$message))
+    return(NULL)
+  })
+}
+
+# Perform stepwise regression for each country
+results <- map(countries, ~stepwise_regression(data, .x))
+
+# Update yhat_step_consump in the original dataset
+for (i in seq_along(countries)) {
+  if (!is.null(results[[i]])) {
+    data <- data %>%
+      mutate(yhat_step_consump = if_else(country == countries[i], results[[i]]$predictions, yhat_step_consump))
+  }
+}
+
+# Extract and combine results
+all_results <- map_dfr(results[!sapply(results, is.null)], ~tidy(.x$coef_summary), .id = "country") %>%
+  mutate(country = countries[as.numeric(country)])
+
+# Print results
+print(all_results)
+
+saveRDS(data, file = "data/processed/09_data.RData")

@@ -1,0 +1,70 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   figure 2 : graphing residuals
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+rm(list=ls())
+
+data <- readRDS(file = "data/processed/13_data.RData")
+
+# libraries ----
+library(dplyr)
+library(fixest)
+library(ggplot2)
+library(purrr)
+
+# Define variable groups
+wealth_vars <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh_vars <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Create residuals
+data <- data %>%
+  group_by(country) %>%
+  do({
+    model <- feols(as.formula(paste("consump ~", paste(c(wealth_vars, hh_vars, "hhsize_cat", "age_head_cat", "state", "month"), collapse = " + "))),
+                   data = ., cluster = ~EA)
+    mutate(., resid = residuals(model))
+  }) %>%
+  ungroup()
+
+# Create and save residual plots
+create_residual_plot <- function(data, country) {
+  pov_line_mean <- mean(data$pov_line_20[data$country == country], na.rm = TRUE)
+
+  plot <- ggplot(data[data$country == country & data$consumption_pctile <= 99, ],
+                 aes(x = consump, y = resid)) +
+    geom_point(size = 0.5, alpha = 0.5) +
+    geom_vline(xintercept = pov_line_mean, linetype = "dashed", color = "red") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    labs(x = "Actual log consumption",
+         y = "Residuals",
+         title = country) +
+    theme_minimal() +
+    theme(plot.background = element_rect(fill = "white"),
+          panel.background = element_rect(fill = "white"))
+
+  ggsave(paste0("resid_", country, ".png"), plot = plot, width = 8, height = 6, dpi = 300)
+
+  return(plot)
+}
+
+residual_plots <- map(countries, ~create_residual_plot(data, .x))
+grid_plot <- do.call(grid.arrange, c(residual_plots, ncol = 3))
+
+# Assign households as predicted poor
+predict_vars <- c("yhat_pmt_sh_consump", "yhat_pmt_sh_poor_20", "yhat_pmt_sh_pr_poor_20",
+                  "yhat_pmt_sh_poor_40", "yhat_pmt_sh_pr_poor_40", "yhat_pmt_sh_qr20_cons",
+                  "yhat_pmt_sh_qr40_cons", "yhat_pmt_sh_qr50_cons", "yhat_w20_sh_cons",
+                  "yhat_w40_sh_cons", "yhat_w60_sh_cons", "yhat_pmt_sh_ae_consump",
+                  "yhat_pmt_sh_urb_consump", "yhat_pmt_ext_consump", "yhat_pmt_ex_qr20_cons",
+                  "yhat_pmt_ex_qr40_cons", "yhat_pmt_ex_qr50_cons", "yhat_w20_cons",
+                  "yhat_w40_cons", "yhat_w60_cons", "yhat_pmt_fs_consump", "yhat_step_consump",
+                  "yhat_pmt_com_consump", "yhat_pmt_sh_cons_burk")
+
+data <- data %>%
+  mutate(across(all_of(predict_vars),
+                list(pr20 = ~ifelse(!is.na(.), ifelse(. <= pov_line_20, 1, 0), NA),
+                     pr40 = ~ifelse(!is.na(.), ifelse(. <= pov_line_40, 1, 0), NA))))
+
+# Save the updated dataset
+saveRDS(data, "data/processed/14_data.RData")

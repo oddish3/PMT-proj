@@ -1,0 +1,101 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   adding in community level variables
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+rm(list=ls())
+
+# library ----
+library(dplyr)
+library(fixest)
+library(data.table)
+library(broom)
+
+data <- readRDS(file = "../data/processed/10_data.RData")
+
+# Generate nval (equivalent to bys country EA: gen nval = _n == 1)
+data <- data %>%
+  group_by(country, EA) %>%
+  mutate(nval = row_number() == 1) %>%
+  ungroup()
+
+# Convert distances to kilometers
+vars <- c("dist_primary", "dist_secondary", "dist_health", "dist_hosp", "dist_bank")
+data[vars] <- lapply(data[vars], function(x) x / 1000)
+
+# Create new distance variables
+data <- data %>%
+  mutate(
+    dist_school = pmin(dist_primary, dist_secondary, na.rm = TRUE),
+    dist_healthcenter = pmin(dist_hosp, dist_health, na.rm = TRUE)
+  )
+
+# Add labels (Note: R doesn't have built-in variable labels like Stata)
+# You might want to use a package like 'labelled' for this functionality
+
+# Tabulate dist_road by country
+tapply(data$dist_road, data$country, summary)
+
+# Replace missing values with 0 for specified variables
+com_vars <- c("dist_road", "dist_popcenter", "dist_market", "dist_borderpost",
+              "dist_school", "dist_healthcenter", "af_bio_12", "af_bio_13", "fsrad3_agpct")
+data[com_vars] <- lapply(data[com_vars], function(x) ifelse(is.na(x), 0, x))
+
+# Weighted tabulation
+weighted_stats <- data %>%
+  group_by(country) %>%
+  summarise(across(all_of(com_vars),
+                   ~weighted.mean(., w = hhweight, na.rm = TRUE)))
+
+print(weighted_stats, digits = 3)
+
+# Generate predicted values
+data$yhat_pmt_com_consump <- NA
+
+# Define variable groups
+wealth_vars <- c("water_piped", "water_well", "toilet_flush", "toilet_pit",
+                 "floor_finish", "wall_finish", "roof_finish", "members_per_room",
+                 "kitchen_room", "fuel_elecgas", "fuel_charcoal")
+
+assets_vars <- c("electric", "radio", "telev", "fridge", "bicycle", "motorbike",
+                 "car", "telephone", "mobile_phone", "computer", "video",
+                 "stove_any", "sew_machine", "aircon", "iron", "satelite",
+                 "generator", "own_house")
+
+hh_vars <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary",
+             "max_edu_primary", "max_edu_secondary", "div_sep_head", "widow_head",
+             "nevermar_head", "female_head_widow", "female_head_div",
+             "female_head_nevermar", "work_paid_head", "work_selfemp_nonf_head",
+             "work_daily_head", "muslim", "christian", "share_05f", "share_05m",
+             "share_614f", "share_614m", "share_65plusf", "share_65plusm",
+             "share_widow", "share_disabledm", "share_disabledf", "share_orphanm",
+             "share_orphanf")
+
+# Note: 'food' variable group is not defined in the original code
+
+# Run regressions for each country
+countries <- c("Ethiopia", "Malawi", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+models <- list()
+
+for (country_name in countries) {
+  formula <- as.formula(paste("consump ~",
+                              paste(c(wealth_vars, assets_vars, hh_vars, com_vars,
+                                      "hhsize_cat", "age_head_cat", "state", "month"),
+                                    collapse = " + ")))
+
+  model <- feols(formula, data = data[data$country == country_name, ])
+  models[[country_name]] <- model
+
+  data$yhat_pmt_com_consump[data$country == country_name] <- predict(model)
+}
+
+# Save results
+# Note: The 'esttab' command doesn't have a direct equivalent in R
+# You might want to use a package like 'stargazer' or 'texreg' for similar functionality
+# Here's a basic way to save the results:
+
+
+results <- lapply(models, tidy)
+results_df <- do.call(rbind, results)
+
+# write.csv(results_df, "results.csv")
+saveRDS(data, file = "../data/processed/11_data.RData")

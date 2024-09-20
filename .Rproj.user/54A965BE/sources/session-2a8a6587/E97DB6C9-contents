@@ -1,0 +1,57 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   assigning households as predicted poor
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+rm(list=ls())
+
+data <- readRDS(file = "../data/processed/14_data.RData")
+# libraries ----
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+# Define the variables
+vars <- c("yhat_pmt_sh_consump", "yhat_pmt_sh_poor_20", "yhat_pmt_sh_pr_poor_20",
+          "yhat_pmt_sh_poor_40", "yhat_pmt_sh_pr_poor_40", "yhat_pmt_sh_qr20_cons",
+          "yhat_pmt_sh_qr40_cons", "yhat_pmt_sh_qr50_cons", "yhat_w20_sh_cons",
+          "yhat_w40_sh_cons", "yhat_w60_sh_cons", "yhat_pmt_sh_ae_consump",
+          "yhat_pmt_sh_urb_consump", "yhat_pmt_ext_consump", "yhat_pmt_ex_qr20_cons",
+          "yhat_pmt_ex_qr40_cons", "yhat_pmt_ex_qr50_cons", "yhat_w20_cons",
+          "yhat_w40_cons", "yhat_w60_cons", "yhat_pmt_fs_consump", "yhat_step_consump",
+          "yhat_pmt_com_consump", "yhat_pmt_sh_cons_burk")
+
+# Generate pr20 and pr40 variables
+data <- data %>%
+  mutate(across(all_of(vars), list(
+    pr20 = ~ifelse(!is.na(.), ifelse(. <= pov_line_20, 1, 0), NA),
+    pr40 = ~ifelse(!is.na(.), ifelse(. <= pov_line_40, 1, 0), NA)
+  )))
+
+# Calculate weighted means by country
+weighted_means <- data %>%
+  group_by(country) %>%
+  summarize(across(c(pr20_yhat_pmt_sh_consump, pr20_yhat_pmt_ext_consump,
+                     pr40_yhat_pmt_sh_consump, pr40_yhat_pmt_ext_consump),
+                   ~weighted.mean(., w = hhweight, na.rm = TRUE)))
+
+# Format the results
+formatted_results <- weighted_means %>%
+  pivot_longer(cols = -country, names_to = "variable", values_to = "value") %>%
+  mutate(value = sprintf("%.3g", value)) %>%
+  pivot_wider(names_from = country, values_from = value)
+
+# Print the results
+print(formatted_results)
+
+
+
+
+
+
+
+
+
+
+
+
+
+saveRDS(data, file = "data/processed/15_data.RData")

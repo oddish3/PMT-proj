@@ -1,0 +1,79 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   Quantile Regression
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+rm(list=ls())
+
+# libraries ----
+library(quantreg)
+
+data <- readRDS(file = "data/processed/02_data.RData")
+nums <- c("20", "40", "50")
+
+# Create new variables for predicted values
+for (num in nums) {
+  data[[paste0("yhat_pmt_sh_qr", num, "_cons")]] <- NA
+  attr(data[[paste0("yhat_pmt_sh_qr", num, "_cons")]], "label") <- paste("Predicted values quantile reg short PMT", num)
+}
+
+# Define variable groups
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+
+# Define countries
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Convert data to data.table for faster operations
+setDT(data)
+
+# Create formula
+formula <- as.formula(paste("consump ~",
+                            paste(c(wealth, hh,
+                                    "factor(hhsize_cat)", "factor(age_head_cat)",
+                                    "factor(state)", "factor(month)"),
+                                  collapse = " + ")))
+
+# Run quantile regressions - takes slightly long
+models <- list()
+for (num in nums) {
+  for (country in countries) {
+    # Subset data for the current country
+    country_data <- data[country == country]
+
+    # Run quantile regression with "fn" method
+    model <- try(rq(formula, tau = as.numeric(paste0("0.", num)),
+                    data = country_data,
+                    method = "fn"))
+
+    if (!inherits(model, "try-error")) {
+      models[[paste(num, country, sep = "_")]] <- model
+
+      # Generate predictions
+      predictions <- predict(model, newdata = country_data)
+
+      # Update the main dataset
+      data[country == country, paste0("yhat_pmt_sh_qr", num, "_cons") := predictions]
+    }
+  }
+}
+
+# Create summary table - takes a while currently
+# summary_table <- do.call(rbind, lapply(models, function(m) {
+#   tidy(m) %>%
+#     filter(term %in% c(wealth, hh)) %>%
+#     dplyr::select(term, estimate, std.error, statistic, p.value)
+# }))
+
+# Export results
+# stargazer(models,
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(models, function(m) summary(m, se = "nid")$coefficients[, 2])),
+#           add.lines = list(c("Observations", sapply(models, nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+# Clear stored estimates (similar to Stata's eststo clear)
+saveRDS(data, file = "data/processed/03_data.RData")

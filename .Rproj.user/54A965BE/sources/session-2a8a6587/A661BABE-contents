@@ -1,0 +1,113 @@
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#                   OLS and Probit
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+rm(list=ls())
+
+# libraries ----
+library(fixest)
+
+data <- readRDS(data, file = "../data/processed/01_data.RData")
+
+depvars <- c("poor_20", "poor_40")
+
+# Create new variables
+for (x in depvars) {
+  data[[paste0("yhat_pmt_sh_", x)]] <- NA
+  data[[paste0("yhat_pmt_sh_pr_", x)]] <- NA
+  attr(data[[paste0("yhat_pmt_sh_", x)]], "label") <- paste("Predicted consumption", x)
+  attr(data[[paste0("yhat_pmt_sh_pr_", x)]], "label") <- paste("Predicted consumption probit", x)
+}
+
+# Define variable groups
+wealth <- c("toilet_flush", "toilet_pit", "floor_finish", "wall_finish", "roof_finish", "fuel_elecgas", "fuel_charcoal")
+hh <- c("urban", "female_head", "edu_head_primary", "edu_head_secondary", "div_sep_head", "widow_head", "work_paid_head", "work_selfemp_nonf_head", "muslim", "christian", "share_05f", "share_05m", "share_614f", "share_614m", "share_65plusf", "share_65plusm")
+
+# Define countries
+countries <- c("BurkinaFaso", "Ethiopia", "Ghana", "Malawi", "Mali", "Niger", "Nigeria", "Tanzania", "Uganda")
+
+# Function to run regression for each country and model type
+run_regression <- function(country_name, dep_var, model_type = "ols") {
+  country_data <- filter(data, country == country_name)
+
+  # Create factor variables
+  country_data$hhsize_cat <- factor(country_data$hhsize_cat)
+  country_data$age_head_cat <- factor(country_data$age_head_cat)
+  country_data$state <- factor(country_data$state)
+  country_data$month <- factor(country_data$month)
+
+  # Remove factors with only one level
+  factors_to_include <- sapply(country_data[, .(hhsize_cat, age_head_cat, state, month)], function(x) length(levels(x)) > 1)
+  factor_vars <- names(factors_to_include)[factors_to_include]
+
+  # Construct formula
+  formula_vars <- c(wealth, hh, paste0("factor(", factor_vars, ")"))
+  formula <- as.formula(paste(dep_var, "~", paste(formula_vars, collapse = " + ")))
+
+  # Run regression
+  if (model_type == "ols") {
+    model <- lm(formula, data = country_data)
+    predictions <- predict(model)
+    data[[paste0("yhat_pmt_sh_", dep_var)]][data$country == country_name] <<- predictions
+  } else if (model_type == "probit") {
+    model <- glm(formula, family = binomial(link = "probit"), data = country_data)
+    predictions <- predict(model, type = "response")
+    data[[paste0("yhat_pmt_sh_pr_", dep_var)]][data$country == country_name] <<- predictions
+  }
+
+  return(model)
+}
+
+# Run regressions for each country and dependent variable - takes slightly long
+models_ols <- list()
+models_probit <- list()
+r_squared_probit <- list()
+
+for (dep_var in depvars) {
+  for (country in countries) {
+    # OLS
+    models_ols[[paste(dep_var, country)]] <- run_regression(country, dep_var, "ols")
+
+    # Probit
+    probit_model <- run_regression(country, dep_var, "probit")
+    models_probit[[paste(dep_var, country)]] <- probit_model
+
+    # Store pseudo R-squared for probit
+    r_squared_probit[[paste(dep_var, country)]] <- with(summary(probit_model), 1 - deviance/null.deviance)
+  }
+}
+
+# Create summary tables
+summary_table_ols <- do.call(rbind, lapply(models_ols, function(m) {
+  tidy(m) %>%
+    filter(term %in% c(wealth, hh)) %>%
+    dplyr::select(term, estimate, std.error, statistic, p.value)
+}))
+
+summary_table_probit <- do.call(rbind, lapply(models_probit, function(m) {
+  tidy(m) %>%
+    filter(term %in% c(wealth, hh)) %>%
+    dplyr::select(term, estimate, std.error, statistic, p.value)
+}))
+
+# Export results
+# stargazer(c(models_ols, models_probit),
+#           type = "text",
+#           out = "results.txt",
+#           keep = c(wealth, hh),
+#           star.cutoffs = c(0.1, 0.05, 0.01),
+#           digits = 3,
+#           se = list(lapply(c(models_ols, models_probit), function(m) sqrt(diag(vcovHC(m, type = "HC1"))))),
+#           add.lines = list(c("Observations", sapply(c(models_ols, models_probit), nobs))),
+#           omit.stat = "f",
+#           style = "all2")
+
+# Print pseudo R-squared for probit models
+for (dep_var in depvars) {
+  for (country in countries) {
+    cat("Pseudo R-squared for", dep_var, "in", country, ":",
+        r_squared_probit[[paste(dep_var, country)]], "\n")
+  }
+}
+
+saveRDS(data, file = "../data/processed/02_data.RData")
